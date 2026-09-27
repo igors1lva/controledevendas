@@ -1,0 +1,17 @@
+================================================================================
+                       CENTRAL DE VENDAS - CONTROLE INTERNO
+                                  AVISO LEGAL
+================================================================================
+
+AVISO LEGAL IMPORTANTE:
+
+O software Central de Vendas destina-se exclusivamente à gestão operacional, 
+controle de estoque e auditoria interna (Software Não-Fiscal).
+
+Esta aplicação NÃO substitui emissores fiscais regulamentados (NFC-e / SAT / ECF) 
+perante a Secretaria da Fazenda (SEFAZ). 
+
+O recolhimento de tributos e obrigações fiscais continuam sob responsabilidade da 
+empresa contratante e de sua assessoria contábil.
+
+================================================================================

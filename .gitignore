@@ -1,0 +1,69 @@
+# Ambientes virtuais Python
+.venv/
+venv/
+ENV/
+env/
+
+# Bytecode e Caches Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Arquivos e pastas de compilação (PyInstaller, Nuitka, scratch, executáveis)
+build/
+dist/
+dist_app/
+dist_admin/
+dist_installer/
+scratch/
+nuitka-crash-report.xml
+*.spec.bak
+*.exe
+*.dll
+
+# Chaves privadas, certificados e segredos criptográficos (Showcase Sanitization)
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.csr
+admin_private.pem
+public_key.pem
+
+# Variáveis de ambiente e segredos locais
+.env
+.env.*
+.env.local
+
+# Bancos de dados locais e backups
+*.db
+*.db-journal
+*.db.bak
+*.sqlite
+*.sqlite3
+*.bak
+gestao_vendas.db*
+
+# Backups e Compactados
+*.zip
+*.rar
+*.tar.gz
+*.7z
+_old/
+_old*/
+
+# Armazenamento e Logs Fiscais / Operacionais
+fiscal_storage/
+acbr_logs/
+logs_fiscais/
+logs/
+*.log
+
+# Licença local em tempo de execução
+license.dat
+
+# Relatórios e planilhas geradas em tempo de execução
+relatorio_vendas_*.xlsx
+*.xlsx
