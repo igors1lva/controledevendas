@@ -41,10 +41,7 @@ class EditProductModal(ctk.CTkToplevel):
         self._criar_widgets()
 
     def _centralizar(self):
-        self.update_idletasks()
-        x = (self.winfo_screenwidth() - self.winfo_width()) // 2
-        y = (self.winfo_screenheight() - self.winfo_height()) // 2
-        self.geometry(f"+{x}+{y}")
+        theme.centralizar_toplevel(self, 480, 520)
 
     def _criar_widgets(self):
         container = ctk.CTkFrame(self, corner_radius=12, fg_color=theme.CARD_BG, border_width=1, border_color=theme.BORDER_COLOR)
@@ -227,6 +224,8 @@ class CatalogView(ctk.CTkFrame):
         self.on_goto_cadastrar = on_goto_cadastrar
 
         self.filtro_ativo = "todos"  # "todos", "em_estoque", "baixo", "esgotados"
+        self._debounce_timer = None
+        self._necessita_recarregar = True
         self._criar_layout()
         self.recarregar_dados()
 
@@ -301,7 +300,8 @@ class CatalogView(ctk.CTkFrame):
             text_color=theme.ENTRY_TEXT,
         )
         self.entry_busca.pack(side="left", fill="x", expand=True, padx=(0, 12))
-        self.entry_busca.bind("<KeyRelease>", lambda event: self.recarregar_dados())
+        self.entry_busca.bind("<KeyRelease>", self._ao_digitar_busca)
+        self.entry_busca.bind("<Return>", self._ao_confirmar_busca)
 
         # Botões de Filtro Rápido (Pills)
         self.btn_filtros = {}
@@ -345,9 +345,9 @@ class CatalogView(ctk.CTkFrame):
         table_card = ctk.CTkFrame(self, corner_radius=12, fg_color=theme.CARD_BG, border_width=1, border_color=theme.BORDER_COLOR)
         table_card.pack(fill="both", expand=True, padx=24, pady=(0, 20))
 
-        # Cabeçalho da Tabela
+        # Cabeçalho da Tabela (alinhado milimetricamente ao frame com scroll)
         header_grid = ctk.CTkFrame(table_card, height=38, fg_color=theme.INNER_CARD_BG, corner_radius=6, border_width=1, border_color=theme.BORDER_COLOR)
-        header_grid.pack(fill="x", padx=16, pady=(12, 6))
+        header_grid.pack(fill="x", padx=(22, 33), pady=(12, 6))
 
         col_configs = [
             ("ID", 45, "center"),
@@ -367,6 +367,7 @@ class CatalogView(ctk.CTkFrame):
                 font=ctk.CTkFont(size=11, weight="bold"),
                 text_color=theme.TEXT_SECONDARY,
                 width=largura,
+                anchor=alinhamento,
             )
             if alinhamento == "w":
                 lbl.pack(side="left", fill="x" if nome_col == "Nome do Produto" else None, expand=True if nome_col == "Nome do Produto" else False, padx=6)
@@ -400,6 +401,18 @@ class CatalogView(ctk.CTkFrame):
         if self.on_data_changed_callback:
             self.on_data_changed_callback()
 
+    def _ao_digitar_busca(self, event=None):
+        if hasattr(self, "_debounce_timer") and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+        self._debounce_timer = self.after(160, self.recarregar_dados)
+
+    def _ao_confirmar_busca(self, event=None):
+        if hasattr(self, "_debounce_timer") and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+            self._debounce_timer = None
+        self.recarregar_dados()
+        return "break"
+
     def _aplicar_filtro(self, filtro_id: str):
         self.filtro_ativo = filtro_id
         for fid, btn in self.btn_filtros.items():
@@ -411,6 +424,12 @@ class CatalogView(ctk.CTkFrame):
 
     def recarregar_dados(self):
         """Atualiza a lista de produtos com base no termo de busca e no filtro ativo."""
+        if hasattr(self, "_debounce_timer") and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+            self._debounce_timer = None
+
+        self._necessita_recarregar = False
+
         for w in self.scroll_frame.winfo_children():
             w.destroy()
 
@@ -447,12 +466,21 @@ class CatalogView(ctk.CTkFrame):
             lbl_vazio.pack(pady=40)
             return
 
-        for p in produtos:
+        # Limite para renderização veloz (máx 100 itens simultâneos)
+        for p in produtos[:100]:
             self._renderizar_linha_produto(p)
+
+        if len(produtos) > 100:
+            ctk.CTkLabel(
+                self.scroll_frame,
+                text=f"Exibindo 100 de {len(produtos)} produtos. Digite na busca para refinar.",
+                font=ctk.CTkFont(size=11, slant="italic"),
+                text_color=theme.TEXT_MUTED,
+            ).pack(pady=8)
 
     def _renderizar_linha_produto(self, p: dict):
         row = ctk.CTkFrame(self.scroll_frame, height=44, fg_color=theme.INNER_CARD_BG, corner_radius=6, border_width=1, border_color=theme.BORDER_COLOR)
-        row.pack(fill="x", pady=2)
+        row.pack(fill="x", pady=3)
 
         # ID
         ctk.CTkLabel(row, text=f"#{p['id']}", width=45, font=ctk.CTkFont(size=11), text_color=theme.TEXT_SECONDARY).pack(side="left", padx=6)

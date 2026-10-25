@@ -197,10 +197,40 @@ class ReportsView(ctk.CTkFrame):
         self.scroll_preview.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
     def recarregar_dados(self):
-        """Atualiza a pré-visualização com base nas vendas do dia."""
+        """Atualiza a pré-visualização e detecta relatórios de fechamento existentes."""
+        self._verificar_arquivo_existente()
         for w in self.scroll_preview.winfo_children():
             w.destroy()
+        self._carregar_tabela_preview()
 
+    def _verificar_arquivo_existente(self):
+        """Habilita botões de abertura se houver fechamento de caixa, relatório recente ou vendas hoje."""
+        caminho_recente = reports.obter_ultimo_relatorio_excel_gerado()
+
+        if not caminho_recente or not os.path.exists(caminho_recente):
+            try:
+                resumo = db.obter_resumo_dia()
+                if resumo and resumo.get("total_vendas", 0) > 0:
+                    sucesso, _, caminho_gerado = reports.gerar_relatorio_diario_excel()
+                    if sucesso and caminho_gerado and os.path.exists(caminho_gerado):
+                        caminho_recente = caminho_gerado
+            except Exception:
+                pass
+
+        if caminho_recente and os.path.exists(caminho_recente):
+            self.ultimo_arquivo_gerado = caminho_recente
+            nome = os.path.basename(caminho_recente)
+            self.lbl_status.configure(
+                text=f"✔ Planilha disponível: {nome} (Gerada por vendas ou Fechamento de Caixa).",
+                text_color="#10B981",
+            )
+            self.btn_abrir_arquivo.configure(state="normal")
+            self.btn_abrir_pasta.configure(state="normal")
+        else:
+            self.btn_abrir_arquivo.configure(state="disabled")
+            self.btn_abrir_pasta.configure(state="normal")
+
+    def _carregar_tabela_preview(self):
         dados = db.obter_relatorio_consolidado_dia()
 
         if not dados:
@@ -250,18 +280,39 @@ class ReportsView(ctk.CTkFrame):
             self.lbl_status.configure(text=f"Aviso: {msg}", text_color="#F59E0B")
 
     def _abrir_arquivo_excel(self):
-        if self.ultimo_arquivo_gerado and os.path.exists(self.ultimo_arquivo_gerado):
+        caminho = reports.obter_ultimo_relatorio_excel_gerado() or self.ultimo_arquivo_gerado
+        if not caminho or not os.path.exists(caminho):
             try:
-                os.startfile(self.ultimo_arquivo_gerado)
-            except Exception as e:
-                self.lbl_status.configure(text=f"Erro ao abrir arquivo: {str(e)}", text_color="#EF4444")
+                resumo = db.obter_resumo_dia()
+                if resumo and resumo.get("total_vendas", 0) > 0:
+                    sucesso, _, caminho_gerado = reports.gerar_relatorio_diario_excel()
+                    if sucesso and caminho_gerado and os.path.exists(caminho_gerado):
+                        caminho = caminho_gerado
+            except Exception:
+                pass
+
+        tem_senha = db.existe_senha_admin()
+        dica_senha = "sua Senha de Administrador" if tem_senha else "Central@2026"
+        sucesso, msg = reports.abrir_arquivo_planilha(caminho)
+        if sucesso:
+            if caminho:
+                self.ultimo_arquivo_gerado = caminho
+            self.lbl_status.configure(text=f"✔ {msg} (Senha: {dica_senha})", text_color="#10B981")
+        else:
+            try:
+                subprocess.Popen(f'explorer /select,"{os.path.abspath(caminho)}"')
+                self.lbl_status.configure(text=f"📁 Pasta aberta com a planilha selecionada (Senha: {dica_senha}).", text_color="#10B981")
+            except Exception:
+                self.lbl_status.configure(text=f"⚠️ {msg}", text_color="#F59E0B")
 
     def _abrir_pasta_destino(self):
-        if self.ultimo_arquivo_gerado and os.path.exists(self.ultimo_arquivo_gerado):
+        caminho = reports.obter_ultimo_relatorio_excel_gerado() or self.ultimo_arquivo_gerado
+        if caminho and os.path.exists(caminho):
+            self.ultimo_arquivo_gerado = caminho
             try:
-                subprocess.Popen(f'explorer /select,"{os.path.abspath(self.ultimo_arquivo_gerado)}"')
+                subprocess.Popen(f'explorer /select,"{os.path.abspath(caminho)}"')
             except Exception:
-                pasta = os.path.dirname(os.path.abspath(self.ultimo_arquivo_gerado))
+                pasta = os.path.dirname(os.path.abspath(caminho))
                 os.startfile(pasta)
         else:
             pasta = db.get_base_dir()

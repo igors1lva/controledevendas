@@ -147,6 +147,11 @@ def validar_licenca() -> Tuple[bool, str, Dict[str, Any]]:
     return True, "Modo de demonstração ativado para fins de portfólio.", info_demo
 
 
+def obter_machine_id() -> str:
+    """Retorna um identificador de máquina demonstrativo para o showcase de portfólio."""
+    return "DEMO-WIN-2026-PORTFOLIO"
+
+
 def remover_licenca() -> bool:
     """Remove o arquivo de licença de demonstração local."""
     if os.path.exists(LICENSE_FILE_PATH):

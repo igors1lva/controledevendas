@@ -34,7 +34,8 @@ class AdminAuthModal(ctk.CTkToplevel):
         self.mostrar_senha = False
 
         self.title(titulo)
-        self.geometry("520x330")
+        self.geometry("600x380")
+        self.minsize(580, 360)
         self.resizable(False, False)
         self.configure(fg_color=theme.MODAL_BG)
 
@@ -54,12 +55,7 @@ class AdminAuthModal(ctk.CTkToplevel):
         self.after(100, lambda: self.entry_senha.focus_set())
 
     def _centralizar(self):
-        self.update_idletasks()
-        w = 520
-        h = 330
-        x = (self.winfo_screenwidth() - w) // 2
-        y = (self.winfo_screenheight() - h) // 2
-        self.geometry(f"{w}x{h}+{x}+{y}")
+        theme.centralizar_toplevel(self, 600, 380)
 
     def _criar_widgets(self, titulo: str, motivo: str):
         card = ctk.CTkFrame(
@@ -73,12 +69,12 @@ class AdminAuthModal(ctk.CTkToplevel):
 
         # Cabeçalho com Ícone de Segurança
         head_row = ctk.CTkFrame(card, fg_color="transparent")
-        head_row.pack(fill="x", padx=20, pady=(16, 8))
+        head_row.pack(fill="x", padx=20, pady=(16, 10))
 
-        badge = ctk.CTkFrame(head_row, width=42, height=42, corner_radius=10, fg_color=theme.ACCENT_BLUE)
+        badge = ctk.CTkFrame(head_row, width=44, height=44, corner_radius=10, fg_color=theme.ACCENT_BLUE)
         badge.pack_propagate(False)
-        badge.pack(side="left", padx=(0, 12))
-        ctk.CTkLabel(badge, text="🔒", font=ctk.CTkFont(size=20)).pack(expand=True)
+        badge.pack(side="left", padx=(0, 14))
+        ctk.CTkLabel(badge, text="🔒", font=ctk.CTkFont(size=22)).pack(expand=True)
 
         col_tit = ctk.CTkFrame(head_row, fg_color="transparent")
         col_tit.pack(side="left", fill="x", expand=True)
@@ -88,6 +84,8 @@ class AdminAuthModal(ctk.CTkToplevel):
             text=titulo,
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=theme.TEXT_PRIMARY,
+            wraplength=480,
+            justify="left",
         ).pack(anchor="w")
 
         ctk.CTkLabel(
@@ -95,40 +93,40 @@ class AdminAuthModal(ctk.CTkToplevel):
             text="Autenticação de segurança para controle de emissão fiscal.",
             font=ctk.CTkFont(size=11),
             text_color=theme.TEXT_SECONDARY,
-        ).pack(anchor="w", pady=(1, 0))
+        ).pack(anchor="w", pady=(2, 0))
 
         # Divisor
-        ctk.CTkFrame(card, height=1, fg_color=theme.BORDER_COLOR).pack(fill="x", padx=20, pady=(6, 12))
+        ctk.CTkFrame(card, height=1, fg_color=theme.BORDER_COLOR).pack(fill="x", padx=20, pady=(6, 14))
 
         # Mensagem / Motivo
         ctk.CTkLabel(
             card,
             text=motivo,
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=13),
             text_color=theme.TEXT_PRIMARY,
-            wraplength=460,
+            wraplength=520,
             justify="left",
-        ).pack(anchor="w", padx=20, pady=(0, 10))
+        ).pack(anchor="w", padx=20, pady=(0, 14))
 
         # Campo de Senha com Botão de Exibir/Ocultar
         box_senha = ctk.CTkFrame(card, fg_color="transparent")
-        box_senha.pack(fill="x", padx=20, pady=(0, 6))
+        box_senha.pack(fill="x", padx=20, pady=(0, 8))
 
         self.entry_senha = ctk.CTkEntry(
             box_senha,
-            height=38,
-            placeholder_text="Digite a senha do administrador ou Central@2026...",
+            height=42,
+            placeholder_text="Digite a senha cadastrada ou Central@2026...",
             font=ctk.CTkFont(size=13),
             show="*",
         )
-        self.entry_senha.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.entry_senha.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
         self.btn_olho = ctk.CTkButton(
             box_senha,
             text="👁️ Exibir",
-            width=85,
-            height=38,
-            font=ctk.CTkFont(size=11, weight="bold"),
+            width=90,
+            height=42,
+            font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=theme.BTN_SECONDARY_BG,
             hover_color=theme.BTN_SECONDARY_HOVER,
             text_color=theme.BTN_SECONDARY_TEXT,
@@ -142,37 +140,39 @@ class AdminAuthModal(ctk.CTkToplevel):
             text="",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=theme.ACCENT_RED[1],
+            wraplength=520,
+            justify="left",
         )
-        self.lbl_status.pack(anchor="w", padx=20, pady=(2, 6))
+        self.lbl_status.pack(anchor="w", padx=20, pady=(2, 8))
 
         # Botões de Ação
         botoes_row = ctk.CTkFrame(card, fg_color="transparent")
-        botoes_row.pack(fill="x", padx=20, pady=(6, 14), side="bottom")
+        botoes_row.pack(fill="x", padx=20, pady=(6, 16), side="bottom")
 
         btn_cancelar = ctk.CTkButton(
             botoes_row,
             text="Cancelar (Esc)",
-            height=36,
+            height=40,
             corner_radius=8,
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=theme.BTN_SECONDARY_BG,
             hover_color=theme.BTN_SECONDARY_HOVER,
             text_color=theme.BTN_SECONDARY_TEXT,
             command=self._cancelar,
         )
-        btn_cancelar.pack(side="left", padx=(0, 8), fill="x", expand=True)
+        btn_cancelar.pack(side="left", padx=(0, 10), fill="x", expand=True)
 
         btn_confirmar = ctk.CTkButton(
             botoes_row,
             text="Confirmar (Enter)",
-            height=36,
+            height=40,
             corner_radius=8,
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=theme.ACCENT_BLUE,
             hover_color=theme.ACCENT_BLUE_HOVER,
             command=self._confirmar,
         )
-        btn_confirmar.pack(side="right", padx=(8, 0), fill="x", expand=True)
+        btn_confirmar.pack(side="right", padx=(10, 0), fill="x", expand=True)
 
     def _toggle_senha(self):
         self.mostrar_senha = not self.mostrar_senha
@@ -206,3 +206,27 @@ class AdminAuthModal(ctk.CTkToplevel):
         self.destroy()
         if not self.confirmado and self.on_cancel_callback:
             self.on_cancel_callback()
+
+
+def solicitar_senha_admin(
+    parent,
+    titulo: str = "🔐 Confirmação de Administrador",
+    motivo: str = "Confirme a senha para autorizar esta operação:",
+) -> bool:
+    """
+    Exibe o modal de autenticação de forma bloqueante e retorna True
+    se o operador digitou a senha de administrador válida.
+    """
+    resultado = {"autorizado": False}
+
+    def on_confirm():
+        resultado["autorizado"] = True
+
+    modal = AdminAuthModal(
+        parent,
+        titulo=titulo,
+        motivo=motivo,
+        on_confirm_callback=on_confirm,
+    )
+    parent.wait_window(modal)
+    return resultado["autorizado"]

@@ -12,6 +12,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 import database as db
+import theme
 
 
 class EditProductModal(ctk.CTkToplevel):
@@ -34,10 +35,7 @@ class EditProductModal(ctk.CTkToplevel):
         self._criar_widgets()
 
     def _centralizar(self):
-        self.update_idletasks()
-        x = (self.winfo_screenwidth() - self.winfo_width()) // 2
-        y = (self.winfo_screenheight() - self.winfo_height()) // 2
-        self.geometry(f"+{x}+{y}")
+        theme.centralizar_toplevel(self, 450, 420)
 
     def _criar_widgets(self):
         container = ctk.CTkFrame(self, corner_radius=12, fg_color="#1E293B")
@@ -179,6 +177,8 @@ class InventoryView(ctk.CTkFrame):
     def __init__(self, parent, on_data_changed_callback: Optional[Callable] = None):
         super().__init__(parent, fg_color="transparent")
         self.on_data_changed_callback = on_data_changed_callback
+        self._debounce_timer = None
+        self._necessita_recarregar = True
 
         self._criar_layout()
         self.recarregar_produtos()
@@ -306,7 +306,8 @@ class InventoryView(ctk.CTkFrame):
             border_color="#334155",
         )
         self.entry_busca.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        self.entry_busca.bind("<KeyRelease>", lambda event: self.recarregar_produtos())
+        self.entry_busca.bind("<KeyRelease>", self._ao_digitar_busca)
+        self.entry_busca.bind("<Return>", self._ao_confirmar_busca)
 
         btn_atualizar = ctk.CTkButton(
             search_frame,
@@ -399,8 +400,30 @@ class InventoryView(ctk.CTkFrame):
             if self.on_data_changed_callback:
                 self.on_data_changed_callback()
 
+    def _ao_digitar_busca(self, event=None):
+        if hasattr(self, "_debounce_timer") and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+        self._debounce_timer = self.after(160, self.recarregar_produtos)
+
+    def _ao_confirmar_busca(self, event=None):
+        if hasattr(self, "_debounce_timer") and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+            self._debounce_timer = None
+        self.recarregar_produtos()
+        return "break"
+
+    def recarregar_dados(self):
+        """Interface unificada de atualização para navegação entre abas."""
+        self.recarregar_produtos()
+
     def recarregar_produtos(self):
         """Atualiza a lista visual de produtos com base no banco de dados."""
+        if hasattr(self, "_debounce_timer") and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+            self._debounce_timer = None
+
+        self._necessita_recarregar = False
+
         # Limpa itens anteriores do scroll frame
         for widget in self.scroll_frame.winfo_children():
             widget.destroy()
@@ -431,8 +454,16 @@ class InventoryView(ctk.CTkFrame):
             lbl_vazio.pack(pady=40)
             return
 
-        for p in produtos:
+        for p in produtos[:100]:
             self._criar_linha_produto(p)
+
+        if len(produtos) > 100:
+            ctk.CTkLabel(
+                self.scroll_frame,
+                text=f"Exibindo 100 de {len(produtos)} produtos. Digite na busca para refinar.",
+                font=ctk.CTkFont(size=11, slant="italic"),
+                text_color="#64748B",
+            ).pack(pady=8)
 
     def _criar_linha_produto(self, produto: dict):
         linha = ctk.CTkFrame(self.scroll_frame, height=44, fg_color="#182234", corner_radius=6)

@@ -26,7 +26,7 @@ class AdminPasswordModal(ctk.CTkToplevel):
         self.mostrar_senhas = False
 
         self.title("🔐 Senha do Administrador - Proteção de Fechamentos")
-        self.geometry("560x540")
+        self.geometry("580x560")
         self.resizable(False, False)
         self.configure(fg_color=theme.MODAL_BG)
 
@@ -37,10 +37,7 @@ class AdminPasswordModal(ctk.CTkToplevel):
         self._criar_widgets()
 
     def _centralizar(self):
-        self.update_idletasks()
-        x = (self.winfo_screenwidth() - 560) // 2
-        y = (self.winfo_screenheight() - 540) // 2
-        self.geometry(f"+{x}+{y}")
+        theme.centralizar_toplevel(self, 580, 560)
 
     def _criar_widgets(self):
         card = ctk.CTkFrame(self, corner_radius=14, fg_color=theme.CARD_BG, border_width=1, border_color=theme.BORDER_COLOR)
@@ -72,6 +69,9 @@ class AdminPasswordModal(ctk.CTkToplevel):
             text="Proteja seus relatórios diários de vendas contra alterações indevidas no Excel.",
             font=ctk.CTkFont(size=11),
             text_color=theme.TEXT_SECONDARY,
+            wraplength=460,
+            justify="left",
+            anchor="w",
         ).pack(anchor="w", pady=(1, 0))
 
         # Divisor
@@ -161,11 +161,13 @@ class AdminPasswordModal(ctk.CTkToplevel):
             info_banner.pack(fill="x", pady=(0, 12))
             ctk.CTkLabel(
                 info_banner,
-                text="ℹ️ Nenhuma senha personalizada foi definida ainda.\nAo definir sua senha, todas as novas planilhas de fechamento serão travadas com esta chave.",
+                text="🔒 Nenhuma senha personalizada foi configurada ainda.\nAo definir sua senha, todas as planilhas de fechamento\nserão travadas e protegidas com esta chave exclusiva.",
                 font=ctk.CTkFont(size=11),
                 text_color=theme.TEXT_PRIMARY,
                 justify="left",
-            ).pack(padx=12, pady=10)
+                wraplength=440,
+                anchor="w",
+            ).pack(fill="x", padx=14, pady=10)
 
         # Campo: Nova Senha
         ctk.CTkLabel(

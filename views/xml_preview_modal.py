@@ -41,10 +41,7 @@ class XMLPreviewModal(ctk.CTkToplevel):
         self._criar_layout()
 
     def _centralizar(self):
-        self.update_idletasks()
-        x = (self.winfo_screenwidth() - self.winfo_width()) // 2
-        y = (self.winfo_screenheight() - self.winfo_height()) // 2
-        self.geometry(f"+{x}+{y}")
+        theme.centralizar_toplevel(self, 960, 650)
 
     def _criar_layout(self):
         container = ctk.CTkFrame(self, fg_color="transparent")

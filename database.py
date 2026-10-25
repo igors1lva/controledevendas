@@ -9,12 +9,14 @@ e consultas agregadas para geração de relatórios.
 
 import os
 import sys
+import re
 import sqlite3
 import hashlib
 import secrets
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple, Optional
+from contextlib import contextmanager
 from cryptography.fernet import Fernet
 
 
@@ -33,15 +35,23 @@ DB_NAME = "gestao_vendas.db"
 DB_PATH = os.path.join(get_base_dir(), DB_NAME)
 
 
-def get_connection() -> sqlite3.Connection:
+@contextmanager
+def get_connection():
     """
     Cria e retorna uma conexão com o banco SQLite.
     Habilita suporte a chaves estrangeiras e retorna linhas como dicionários.
+    Garante o encerramento seguro e a liberação imediata de recursos ao fim do bloco with.
     """
     conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
+    try:
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def init_db() -> None:
@@ -161,6 +171,32 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE vendas ADD COLUMN status TEXT DEFAULT 'CONCLUIDA';")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_vendas_status ON vendas (status);")
 
+        if "forma_pagamento" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN forma_pagamento TEXT DEFAULT 'DINHEIRO';")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_vendas_forma_pagamento ON vendas (forma_pagamento);")
+
+        if "cpf_cliente" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN cpf_cliente TEXT DEFAULT '';")
+
+        # Tabela de Histórico de Fechamentos de Caixa (Gera registro a cada fechamento no PDV)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fechamentos_caixa (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                data_hora TEXT NOT NULL,
+                data_referencia TEXT NOT NULL,
+                total_vendas INTEGER NOT NULL,
+                total_itens INTEGER NOT NULL,
+                total_faturamento REAL NOT NULL,
+                total_custo REAL DEFAULT 0.0,
+                total_lucro REAL DEFAULT 0.0,
+                caminho_excel TEXT,
+                hash_sha256 TEXT
+            );
+            """
+        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_fc_data ON fechamentos_caixa (data_referencia);")
+
         # Tabela de Registro Fiscal da Venda (NFC-e / Contingência Offline)
         cursor.execute(
             """
@@ -184,6 +220,7 @@ def init_db() -> None:
                 tentativas_sincronizacao INTEGER DEFAULT 0,
                 ultima_tentativa TEXT,
                 motivo_contingencia TEXT,
+                cpf_destinatario TEXT DEFAULT '',
                 FOREIGN KEY (venda_id) REFERENCES vendas (id) ON DELETE RESTRICT
             );
             """
@@ -191,6 +228,11 @@ def init_db() -> None:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vf_status ON vendas_fiscais (status_fiscal);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vf_chave ON vendas_fiscais (chave_acesso);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vf_venda ON vendas_fiscais (venda_id);")
+
+        cursor.execute("PRAGMA table_info(vendas_fiscais);")
+        colunas_vf = [row["name"] for row in cursor.fetchall()]
+        if "cpf_destinatario" not in colunas_vf:
+            cursor.execute("ALTER TABLE vendas_fiscais ADD COLUMN cpf_destinatario TEXT DEFAULT '';")
 
         conn.commit()
 
@@ -370,20 +412,67 @@ def excluir_produto(produto_id: int) -> Tuple[bool, str]:
 def listar_produtos(termo_busca: str = "") -> List[Dict[str, Any]]:
     """
     Retorna a lista de produtos cadastrados, opcionalmente filtrada por termo de busca
-    no nome ou no código de barras.
+    no nome ou no código de barras. Suporta correspondência exata, múltiplos tokens e busca por palavras-chave.
+    Para tokens curtos (<= 2 caracteres, ex: 'D', 'M', '1'), aplica limite de palavra para evitar
+    falsos positivos em palavras como 'produto' ou 'demonstrativo'.
     """
-    termo = f"%{termo_busca.strip()}%"
+    termo_limpo = re.sub(r"[^\w\s]", " ", termo_busca or "").strip()
+    tokens = [t for t in termo_limpo.split() if t]
+
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
+        if not tokens:
+            cursor.execute(
+                """
+                SELECT id, nome, preco, preco_custo, estoque, codigo_barras, data_cadastro
+                FROM produtos
+                ORDER BY nome ASC;
+                """
+            )
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+        # 1. Se contém múltiplos termos, tenta correspondência contígua da frase completa primeiro
+        if len(tokens) > 1:
+            frase_like = f"%{termo_limpo}%"
+            cursor.execute(
+                """
+                SELECT id, nome, preco, preco_custo, estoque, codigo_barras, data_cadastro
+                FROM produtos
+                WHERE nome LIKE ? OR (codigo_barras IS NOT NULL AND codigo_barras LIKE ?)
+                ORDER BY nome ASC;
+                """,
+                (frase_like, frase_like),
+            )
+            rows_frase = cursor.fetchall()
+            if rows_frase:
+                return [dict(row) for row in rows_frase]
+
+        # 2. Correspondência inteligente por tokens
+        clausulas = []
+        parametros = []
+        for t in tokens:
+            if len(t) <= 2:
+                clausula_t = """(
+                    nome = ? OR 
+                    nome LIKE ? || ' %' OR 
+                    nome LIKE '% ' || ? || ' %' OR 
+                    nome LIKE '% ' || ? OR 
+                    (codigo_barras IS NOT NULL AND (codigo_barras = ? OR codigo_barras LIKE ? || ' %' OR codigo_barras LIKE '% ' || ?))
+                )"""
+                clausulas.append(clausula_t)
+                parametros.extend([t, t, t, t, t, t, t])
+            else:
+                clausulas.append("(nome LIKE ? OR (codigo_barras IS NOT NULL AND codigo_barras LIKE ?))")
+                parametros.extend([f"%{t}%", f"%{t}%"])
+
+        sql = f"""
             SELECT id, nome, preco, preco_custo, estoque, codigo_barras, data_cadastro
             FROM produtos
-            WHERE nome LIKE ? OR (codigo_barras IS NOT NULL AND codigo_barras LIKE ?)
+            WHERE {" AND ".join(clausulas)}
             ORDER BY nome ASC;
-            """,
-            (termo, termo),
-        )
+        """
+        cursor.execute(sql, parametros)
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -404,6 +493,10 @@ def obter_produto_por_id(produto_id: int) -> Optional[Dict[str, Any]]:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+# Alias de compatibilidade
+obter_produtos = listar_produtos
 
 
 def obter_produto_por_codigo_barras(codigo_barras: str) -> Optional[Dict[str, Any]]:
@@ -520,88 +613,196 @@ def repor_ou_cadastrar_produto_xml(
 # OPERAÇÕES DE VENDAS (PDV)
 # ============================================================================
 
-def registrar_venda(produto_id: int, quantidade: int) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+def registrar_venda(
+    produto_id: int,
+    quantidade: int,
+    forma_pagamento: str = "DINHEIRO",
+    cpf_cliente: str = "",
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """
     Realiza uma transação atômica de venda:
     1. Verifica se o produto existe e tem estoque suficiente.
     2. Abate a quantidade vendida do estoque do produto.
-    3. Registra a venda com data e hora atual.
+    3. Registra a venda com data, hora, forma de pagamento e CPF do cliente (opcional).
     4. Confirma tudo via COMMIT seguro ou ROLLBACK em caso de falha.
     """
     if quantidade <= 0:
         return False, "A quantidade vendida deve ser no mínimo 1 unidade.", None
 
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        # Inicia transação imediata para garantir exclusividade de escrita
-        cursor.execute("BEGIN IMMEDIATE;")
+    forma_pgto_limpa = forma_pagamento.strip().upper() if forma_pagamento else "DINHEIRO"
+    cpf_limpo = cpf_cliente.strip() if cpf_cliente else ""
 
-        # Obtém o produto e verifica estoque
-        cursor.execute("SELECT id, nome, preco, estoque FROM produtos WHERE id = ?", (produto_id,))
-        produto = cursor.fetchone()
+    with get_connection() as conn:
+        try:
+            cursor = conn.cursor()
+            # Inicia transação imediata para garantir exclusividade de escrita
+            cursor.execute("BEGIN IMMEDIATE;")
 
-        if not produto:
-            conn.rollback()
-            return False, "Produto não encontrado.", None
+            # Obtém o produto e verifica estoque
+            cursor.execute("SELECT id, nome, preco, estoque FROM produtos WHERE id = ?", (produto_id,))
+            produto = cursor.fetchone()
 
-        estoque_atual = produto["estoque"]
-        preco_unitario = produto["preco"]
-        produto_nome = produto["nome"]
+            if not produto:
+                conn.rollback()
+                return False, "Produto não encontrado.", None
 
-        if estoque_atual <= 0:
-            conn.rollback()
-            return False, f"O produto '{produto_nome}' está esgotado (estoque 0).", None
+            estoque_atual = produto["estoque"]
+            preco_unitario = produto["preco"]
+            produto_nome = produto["nome"]
 
-        if quantidade > estoque_atual:
-            conn.rollback()
-            return (
-                False,
-                f"Estoque insuficiente para '{produto_nome}'. Disponível: {estoque_atual} un, Solicitado: {quantidade} un.",
-                None,
+            if estoque_atual <= 0:
+                conn.rollback()
+                return False, f"O produto '{produto_nome}' está esgotado (estoque 0).", None
+
+            if quantidade > estoque_atual:
+                conn.rollback()
+                return (
+                    False,
+                    f"Estoque insuficiente para '{produto_nome}'. Disponível: {estoque_atual} un, Solicitado: {quantidade} un.",
+                    None,
+                )
+
+            # 1. Abater do estoque
+            novo_estoque = estoque_atual - quantidade
+            cursor.execute(
+                "UPDATE produtos SET estoque = ? WHERE id = ?",
+                (novo_estoque, produto_id),
             )
 
-        # 1. Abater do estoque
-        novo_estoque = estoque_atual - quantidade
-        cursor.execute(
-            "UPDATE produtos SET estoque = ? WHERE id = ?",
-            (novo_estoque, produto_id),
-        )
+            # 2. Registrar a transação de venda
+            valor_total = round(preco_unitario * quantidade, 2)
+            agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 2. Registrar a transação de venda
-        valor_total = round(preco_unitario * quantidade, 2)
-        agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                """
+                INSERT INTO vendas (produto_id, produto_nome, quantidade, preco_unitario, valor_total, data_hora, status, forma_pagamento, cpf_cliente)
+                VALUES (?, ?, ?, ?, ?, ?, 'CONCLUIDA', ?, ?);
+                """,
+                (produto_id, produto_nome, quantidade, preco_unitario, valor_total, agora, forma_pgto_limpa, cpf_limpo),
+            )
+            venda_id = cursor.lastrowid
 
-        cursor.execute(
-            """
-            INSERT INTO vendas (produto_id, produto_nome, quantidade, preco_unitario, valor_total, data_hora, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'CONCLUIDA');
-            """,
-            (produto_id, produto_nome, quantidade, preco_unitario, valor_total, agora),
-        )
-        venda_id = cursor.lastrowid
+            conn.commit()
 
-        conn.commit()
+            info_venda = {
+                "venda_id": venda_id,
+                "produto_id": produto_id,
+                "produto_nome": produto_nome,
+                "quantidade": quantidade,
+                "preco_unitario": preco_unitario,
+                "valor_total": valor_total,
+                "data_hora": agora,
+                "status": "CONCLUIDA",
+                "forma_pagamento": forma_pgto_limpa,
+                "cpf_cliente": cpf_limpo,
+                "estoque_restante": novo_estoque,
+            }
 
-        info_venda = {
-            "venda_id": venda_id,
-            "produto_id": produto_id,
-            "produto_nome": produto_nome,
-            "quantidade": quantidade,
-            "preco_unitario": preco_unitario,
-            "valor_total": valor_total,
-            "data_hora": agora,
-            "status": "CONCLUIDA",
-            "estoque_restante": novo_estoque,
-        }
+            return True, f"Venda realizada com sucesso! ({quantidade}x {produto_nome})", info_venda
 
-        return True, f"Venda realizada com sucesso! ({quantidade}x {produto_nome})", info_venda
+        except Exception as e:
+            conn.rollback()
+            return False, f"Falha ao registrar venda: {str(e)}", None
 
-    except Exception as e:
-        conn.rollback()
-        return False, f"Falha ao registrar venda: {str(e)}", None
-    finally:
-        conn.close()
+
+def registrar_venda_carrinho(
+    itens: List[Dict[str, Any]],
+    forma_pagamento: str = "DINHEIRO",
+    cpf_cliente: str = "",
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """
+    Realiza uma transação atômica de venda para múltiplos itens acumulados no carrinho:
+    1. Valida se o carrinho possui ao menos 1 item com quantidade válida.
+    2. Sob transação BEGIN IMMEDIATE, valida a existência e estoque de CADA produto.
+    3. Abate atomicamente a quantidade vendida de cada produto.
+    4. Registra cada item na tabela de vendas com a mesma data/hora, forma de pagamento e CPF do cliente.
+    5. Confirma tudo via COMMIT seguro ou ROLLBACK completo em caso de inconsistência.
+    """
+    if not itens:
+        return False, "O carrinho de compras está vazio.", None
+
+    forma_pgto_limpa = forma_pagamento.strip().upper() if forma_pagamento else "DINHEIRO"
+    cpf_limpo = cpf_cliente.strip() if cpf_cliente else ""
+
+    with get_connection() as conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE;")
+
+            produtos_validados = []
+            for item in itens:
+                p_id = int(item["produto_id"])
+                qtd = int(item["quantidade"])
+                if qtd <= 0:
+                    conn.rollback()
+                    return False, f"A quantidade para o produto ID {p_id} deve ser de no mínimo 1 unidade.", None
+
+                cursor.execute("SELECT id, nome, preco, estoque FROM produtos WHERE id = ?", (p_id,))
+                p = cursor.fetchone()
+                if not p:
+                    conn.rollback()
+                    return False, f"Produto ID {p_id} não encontrado no catálogo.", None
+
+                if p["estoque"] < qtd:
+                    conn.rollback()
+                    return (
+                        False,
+                        f"Estoque insuficiente para '{p['nome']}'. Disponível: {p['estoque']} un, Solicitado: {qtd} un.",
+                        None,
+                    )
+
+                produtos_validados.append({
+                    "produto_id": p["id"],
+                    "produto_nome": p["nome"],
+                    "quantidade": qtd,
+                    "preco_unitario": p["preco"],
+                    "valor_total": round(p["preco"] * qtd, 2),
+                    "estoque_anterior": p["estoque"],
+                    "estoque_restante": p["estoque"] - qtd,
+                })
+
+            agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            vendas_ids = []
+            valor_total_geral = 0.0
+
+            for pv in produtos_validados:
+                # 1. Abate do estoque
+                cursor.execute(
+                    "UPDATE produtos SET estoque = ? WHERE id = ?",
+                    (pv["estoque_restante"], pv["produto_id"]),
+                )
+
+                # 2. Insere registro de venda
+                cursor.execute(
+                    """
+                    INSERT INTO vendas (produto_id, produto_nome, quantidade, preco_unitario, valor_total, data_hora, status, forma_pagamento, cpf_cliente)
+                    VALUES (?, ?, ?, ?, ?, ?, 'CONCLUIDA', ?, ?);
+                    """,
+                    (pv["produto_id"], pv["produto_nome"], pv["quantidade"], pv["preco_unitario"], pv["valor_total"], agora, forma_pgto_limpa, cpf_limpo),
+                )
+                vendas_ids.append(cursor.lastrowid)
+                valor_total_geral += pv["valor_total"]
+
+            conn.commit()
+
+            info_carrinho = {
+                "vendas_ids": vendas_ids,
+                "itens": produtos_validados,
+                "total_itens": sum(pv["quantidade"] for pv in produtos_validados),
+                "total_produtos_distintos": len(produtos_validados),
+                "valor_total": round(valor_total_geral, 2),
+                "data_hora": agora,
+                "status": "CONCLUIDA",
+                "forma_pagamento": forma_pgto_limpa,
+                "cpf_cliente": cpf_limpo,
+            }
+
+            resumo_msg = f"{len(produtos_validados)} produto(s), total {info_carrinho['total_itens']} un"
+            return True, f"Venda do carrinho realizada com sucesso! ({resumo_msg})", info_carrinho
+
+        except Exception as e:
+            conn.rollback()
+            return False, f"Falha ao registrar venda do carrinho: {str(e)}", None
 
 
 def cancelar_venda(venda_id: int) -> Tuple[bool, str]:
@@ -612,50 +813,48 @@ def cancelar_venda(venda_id: int) -> Tuple[bool, str]:
     3. Atualiza o status da transação para 'CANCELADA'.
     4. Garante consistência e integridade atômica via transação SQLite.
     """
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute("BEGIN IMMEDIATE;")
+    with get_connection() as conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE;")
 
-        cursor.execute(
-            "SELECT id, produto_id, produto_nome, quantidade, status FROM vendas WHERE id = ?;",
-            (venda_id,),
-        )
-        venda = cursor.fetchone()
+            cursor.execute(
+                "SELECT id, produto_id, produto_nome, quantidade, status FROM vendas WHERE id = ?;",
+                (venda_id,),
+            )
+            venda = cursor.fetchone()
 
-        if not venda:
+            if not venda:
+                conn.rollback()
+                return False, f"Venda #{venda_id} não encontrada no sistema."
+
+            status_atual = venda["status"] if ("status" in venda.keys() and venda["status"]) else "CONCLUIDA"
+            if status_atual == "CANCELADA":
+                conn.rollback()
+                return False, f"A venda #{venda_id} já foi cancelada anteriormente."
+
+            produto_id = venda["produto_id"]
+            quantidade = venda["quantidade"]
+            produto_nome = venda["produto_nome"]
+
+            # 1. Repor estoque do produto
+            cursor.execute(
+                "UPDATE produtos SET estoque = estoque + ? WHERE id = ?;",
+                (quantidade, produto_id),
+            )
+
+            # 2. Marcar a venda como CANCELADA
+            cursor.execute(
+                "UPDATE vendas SET status = 'CANCELADA' WHERE id = ?;",
+                (venda_id,),
+            )
+
+            conn.commit()
+            return True, f"Venda #{venda_id} cancelada com sucesso! {quantidade} un de '{produto_nome}' foram repostas no estoque."
+
+        except Exception as e:
             conn.rollback()
-            return False, f"Venda #{venda_id} não encontrada no sistema."
-
-        status_atual = venda["status"] if ("status" in venda.keys() and venda["status"]) else "CONCLUIDA"
-        if status_atual == "CANCELADA":
-            conn.rollback()
-            return False, f"A venda #{venda_id} já foi cancelada anteriormente."
-
-        produto_id = venda["produto_id"]
-        quantidade = venda["quantidade"]
-        produto_nome = venda["produto_nome"]
-
-        # 1. Repor estoque do produto
-        cursor.execute(
-            "UPDATE produtos SET estoque = estoque + ? WHERE id = ?;",
-            (quantidade, produto_id),
-        )
-
-        # 2. Marcar a venda como CANCELADA
-        cursor.execute(
-            "UPDATE vendas SET status = 'CANCELADA' WHERE id = ?;",
-            (venda_id,),
-        )
-
-        conn.commit()
-        return True, f"Venda #{venda_id} cancelada com sucesso! {quantidade} un de '{produto_nome}' foram repostas no estoque."
-
-    except Exception as e:
-        conn.rollback()
-        return False, f"Erro ao cancelar venda #{venda_id}: {str(e)}"
-    finally:
-        conn.close()
+            return False, f"Erro ao cancelar venda #{venda_id}: {str(e)}"
 
 
 def obter_vendas_recentes_do_dia(limite: int = 500) -> List[Dict[str, Any]]:
@@ -677,6 +876,109 @@ def obter_vendas_recentes_do_dia(limite: int = 500) -> List[Dict[str, Any]]:
             """,
             (hoje, limite),
         )
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def buscar_vendas(termo_busca: str = "", limite: int = 500) -> List[Dict[str, Any]]:
+    """
+    Busca transações de vendas no histórico com suporte a múltiplos termos (nome do produto, ID, data, status).
+    Se termo_busca for vazio:
+    - Retorna as vendas de hoje;
+    - Se hoje não houver vendas, retorna as últimas vendas registradas do sistema para que a tela não fique vazia.
+    Suporta correspondência exata por frase (ex: 'Modelo D') e limites de palavra para tokens curtos (evita falso positivo).
+    """
+    termo_limpo = re.sub(r"[^\w\s\-:]", " ", termo_busca or "").strip()
+    tokens = [t for t in termo_limpo.split() if t]
+
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if not tokens:
+            cursor.execute(
+                """
+                SELECT id, produto_id, produto_nome, quantidade, preco_unitario, valor_total, data_hora,
+                       COALESCE(status, 'CONCLUIDA') AS status
+                FROM vendas
+                WHERE substr(data_hora, 1, 10) = ?
+                ORDER BY id DESC
+                LIMIT ?;
+                """,
+                (hoje, limite),
+            )
+            rows = cursor.fetchall()
+            if rows:
+                return [dict(row) for row in rows]
+
+            cursor.execute(
+                """
+                SELECT id, produto_id, produto_nome, quantidade, preco_unitario, valor_total, data_hora,
+                       COALESCE(status, 'CONCLUIDA') AS status
+                FROM vendas
+                ORDER BY id DESC
+                LIMIT ?;
+                """,
+                (limite,),
+            )
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+        # 1. Correspondência de frase contígua se múltiplos termos
+        if len(tokens) > 1:
+            frase_like = f"%{termo_limpo}%"
+            cursor.execute(
+                """
+                SELECT id, produto_id, produto_nome, quantidade, preco_unitario, valor_total, data_hora,
+                       COALESCE(status, 'CONCLUIDA') AS status
+                FROM vendas
+                WHERE produto_nome LIKE ? OR data_hora LIKE ? OR COALESCE(status, '') LIKE ?
+                ORDER BY id DESC
+                LIMIT ?;
+                """,
+                (frase_like, frase_like, frase_like, limite),
+            )
+            rows_frase = cursor.fetchall()
+            if rows_frase:
+                return [dict(row) for row in rows_frase]
+
+        # 2. Correspondência inteligente por tokens
+        clausulas = []
+        parametros = []
+        for t in tokens:
+            if len(t) <= 2:
+                clausulas.append(
+                    """(
+                        produto_nome = ? OR 
+                        produto_nome LIKE ? || ' %' OR 
+                        produto_nome LIKE '% ' || ? || ' %' OR 
+                        produto_nome LIKE '% ' || ? OR 
+                        CAST(id AS TEXT) = ? OR 
+                        data_hora LIKE ? OR 
+                        COALESCE(status, '') = ?
+                    )"""
+                )
+                parametros.extend([t, t, t, t, t, f"%{t}%", t])
+            else:
+                clausulas.append(
+                    """(
+                        produto_nome LIKE ? OR 
+                        CAST(id AS TEXT) LIKE ? OR 
+                        data_hora LIKE ? OR 
+                        COALESCE(status, '') LIKE ?
+                    )"""
+                )
+                parametros.extend([f"%{t}%", f"%{t}%", f"%{t}%", f"%{t}%"])
+
+        sql = f"""
+            SELECT id, produto_id, produto_nome, quantidade, preco_unitario, valor_total, data_hora,
+                   COALESCE(status, 'CONCLUIDA') AS status
+            FROM vendas
+            WHERE {" AND ".join(clausulas)}
+            ORDER BY id DESC
+            LIMIT ?;
+        """
+        parametros.append(limite)
+        cursor.execute(sql, parametros)
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -761,6 +1063,413 @@ def obter_relatorio_consolidado_dia(data_str: Optional[str] = None) -> List[Dict
         )
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+def obter_vendas_canceladas_dia(data_str: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Retorna todas as vendas canceladas/estornadas na data informada (padrão: hoje),
+    com identificador, produto, quantidade, valores e forma de pagamento original.
+    Permite demonstrar e auditar os cancelamentos no relatório Excel oficial.
+    """
+    if not data_str:
+        data_str = datetime.now().strftime("%Y-%m-%d")
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 
+                v.id,
+                v.produto_id,
+                v.produto_nome,
+                v.quantidade,
+                v.preco_unitario,
+                v.valor_total,
+                v.data_hora,
+                v.forma_pagamento,
+                COALESCE(v.cpf_cliente, '') AS cpf_cliente,
+                COALESCE(p.preco_custo, 0.0) AS preco_custo,
+                ROUND(v.quantidade * COALESCE(p.preco_custo, 0.0), 2) AS custo_total
+            FROM vendas v
+            LEFT JOIN produtos p ON v.produto_id = p.id
+            WHERE substr(v.data_hora, 1, 10) = ?
+              AND v.status = 'CANCELADA'
+            ORDER BY v.id DESC;
+            """,
+            (data_str,),
+        )
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def obter_resumo_caixa_detalhado(data_str: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Retorna métricas operacionais completas do caixa para fechamento de turno/dia:
+    - Faturamento bruto, custo CMV, lucro apurado e margem %
+    - Contagem de transações e itens comercializados
+    - Desdobramento financeiro por método de pagamento (Dinheiro, Pix, Cartão, etc.)
+    """
+    if not data_str:
+        data_str = datetime.now().strftime("%Y-%m-%d")
+
+    resumo_base = obter_resumo_dia(data_str)
+    faturamento = resumo_base["total_faturamento"]
+    lucro = resumo_base["total_lucro"]
+    vendas_count = resumo_base["total_vendas"]
+
+    margem = round((lucro / faturamento * 100), 1) if faturamento > 0 else 0.0
+    ticket_medio = round(faturamento / vendas_count, 2) if vendas_count > 0 else 0.0
+
+    formas_dict = {
+        "DINHEIRO": 0.0,
+        "PIX": 0.0,
+        "CARTAO_DEBITO": 0.0,
+        "CARTAO_CREDITO": 0.0,
+        "VALE_ALIMENTACAO": 0.0,
+        "OUTROS": 0.0,
+    }
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 
+                COALESCE(UPPER(forma_pagamento), 'DINHEIRO') AS forma,
+                COALESCE(SUM(valor_total), 0.0) AS total,
+                COUNT(id) AS qtd
+            FROM vendas
+            WHERE substr(data_hora, 1, 10) = ?
+              AND (status IS NULL OR status != 'CANCELADA')
+            GROUP BY COALESCE(UPPER(forma_pagamento), 'DINHEIRO');
+            """,
+            (data_str,),
+        )
+        for row in cursor.fetchall():
+            forma = row["forma"]
+            tot = float(row["total"])
+            if forma in formas_dict:
+                formas_dict[forma] += tot
+            else:
+                formas_dict["OUTROS"] += tot
+
+        # Busca último fechamento do dia se houver
+        cursor.execute(
+            """
+            SELECT id, data_hora, total_faturamento, caminho_excel 
+            FROM fechamentos_caixa 
+            WHERE data_referencia = ? 
+            ORDER BY id DESC LIMIT 1;
+            """,
+            (data_str,),
+        )
+        ult_fech = cursor.fetchone()
+        ultimo_fechamento_info = dict(ult_fech) if ult_fech else None
+
+    return {
+        "data": data_str,
+        "total_faturamento": faturamento,
+        "total_custo": resumo_base["total_custo"],
+        "total_lucro": lucro,
+        "margem_lucro": margem,
+        "ticket_medio": ticket_medio,
+        "total_vendas": vendas_count,
+        "total_itens": resumo_base["total_itens"],
+        "formas_pagamento": formas_dict,
+        "ultimo_fechamento": ultimo_fechamento_info,
+    }
+
+
+def registrar_fechamento_caixa(
+    caminho_excel: str = "",
+    hash_sha256: str = "",
+    data_referencia: Optional[str] = None,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Registra um evento oficial de fechamento de caixa na base de dados SQLite.
+    Garante rastreabilidade histórica e integridade com o relatório Excel gerado.
+    """
+    if not data_referencia:
+        data_referencia = datetime.now().strftime("%Y-%m-%d")
+
+    resumo = obter_resumo_dia(data_referencia)
+    agora_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO fechamentos_caixa (
+                data_hora, data_referencia, total_vendas, total_itens,
+                total_faturamento, total_custo, total_lucro, caminho_excel, hash_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                agora_iso,
+                data_referencia,
+                resumo["total_vendas"],
+                resumo["total_itens"],
+                resumo["total_faturamento"],
+                resumo["total_custo"],
+                resumo["total_lucro"],
+                caminho_excel,
+                hash_sha256,
+            ),
+        )
+        fechamento_id = cursor.lastrowid
+        conn.commit()
+
+    info_retorno = {
+        "id": fechamento_id,
+        "data_hora": agora_iso,
+        "data_referencia": data_referencia,
+        "total_faturamento": resumo["total_faturamento"],
+        "total_vendas": resumo["total_vendas"],
+        "total_itens": resumo["total_itens"],
+        "total_lucro": resumo["total_lucro"],
+        "caminho_excel": caminho_excel,
+        "hash_sha256": hash_sha256,
+    }
+
+    return True, f"Fechamento de caixa #{fechamento_id} registrado com sucesso!", info_retorno
+
+
+def obter_metricas_dashboard(periodo: str = "hoje") -> Dict[str, Any]:
+    """
+    Gera as estatísticas consolidadas e séries temporais para o Dashboard In-App Analytics.
+    Periodos suportados:
+    - 'hoje': Vendas de hoje
+    - '7d': Últimos 7 dias
+    - '30d': Últimos 30 dias
+    - 'mes': Mês corrente
+    - 'todos': Histórico completo
+    """
+    agora = datetime.now()
+    hoje_iso = agora.strftime("%Y-%m-%d")
+    mes_iso = agora.strftime("%Y-%m")
+
+    if periodo == "hoje":
+        clausula_where = "substr(v.data_hora, 1, 10) = ?"
+        params = (hoje_iso,)
+        titulo_periodo = f"Hoje ({agora.strftime('%d/%m/%Y')})"
+    elif periodo == "7d":
+        data_ini = (agora - timedelta(days=6)).strftime("%Y-%m-%d")
+        clausula_where = "substr(v.data_hora, 1, 10) >= ?"
+        params = (data_ini,)
+        titulo_periodo = f"Últimos 7 Dias (desde {datetime.strptime(data_ini, '%Y-%m-%d').strftime('%d/%m')})"
+    elif periodo == "30d":
+        data_ini = (agora - timedelta(days=29)).strftime("%Y-%m-%d")
+        clausula_where = "substr(v.data_hora, 1, 10) >= ?"
+        params = (data_ini,)
+        titulo_periodo = f"Últimos 30 Dias (desde {datetime.strptime(data_ini, '%Y-%m-%d').strftime('%d/%m')})"
+    elif periodo == "mes":
+        clausula_where = "substr(v.data_hora, 1, 7) = ?"
+        params = (mes_iso,)
+        titulo_periodo = f"Mês de {agora.strftime('%B/%Y').capitalize()}"
+    else:  # todos
+        clausula_where = "1=1"
+        params = ()
+        titulo_periodo = "Todo o Período Histórico"
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # 1. Totais Gerais do Período (Vendas Ativas Concluídas)
+        sql_totais = f"""
+            SELECT 
+                COALESCE(SUM(v.valor_total), 0.0) AS total_faturamento,
+                COALESCE(SUM(v.quantidade), 0) AS total_itens,
+                COUNT(v.id) AS total_vendas,
+                COALESCE(SUM(v.quantidade * COALESCE(p.preco_custo, 0.0)), 0.0) AS total_custo,
+                COALESCE(SUM(v.valor_total - (v.quantidade * COALESCE(p.preco_custo, 0.0))), 0.0) AS total_lucro
+            FROM vendas v
+            LEFT JOIN produtos p ON v.produto_id = p.id
+            WHERE {clausula_where}
+              AND (v.status IS NULL OR v.status != 'CANCELADA');
+        """
+        cursor.execute(sql_totais, params)
+        row_tot = cursor.fetchone()
+
+        fat = float(row_tot["total_faturamento"])
+        custo = float(row_tot["total_custo"])
+        lucro = float(row_tot["total_lucro"])
+        vendas_n = int(row_tot["total_vendas"])
+        itens_n = int(row_tot["total_itens"])
+        margem = round((lucro / fat * 100), 1) if fat > 0 else 0.0
+        ticket = round(fat / vendas_n, 2) if vendas_n > 0 else 0.0
+
+        # 1.1 Totais de Estornos / Vendas Canceladas no Período
+        sql_canceladas = f"""
+            SELECT 
+                COALESCE(SUM(v.valor_total), 0.0) AS total_cancelado,
+                COUNT(v.id) AS total_canceladas,
+                COALESCE(SUM(v.quantidade), 0) AS itens_cancelados
+            FROM vendas v
+            WHERE {clausula_where}
+              AND v.status = 'CANCELADA';
+        """
+        cursor.execute(sql_canceladas, params)
+        row_canc = cursor.fetchone()
+        tot_cancelado = float(row_canc["total_cancelado"])
+        qtd_canceladas = int(row_canc["total_canceladas"])
+        itens_cancelados = int(row_canc["itens_cancelados"])
+        fat_bruto = round(fat + tot_cancelado, 2)
+
+        # 2. Série Diária (Evolução das Vendas por Dia)
+        sql_diario = f"""
+            SELECT 
+                substr(v.data_hora, 1, 10) AS dia,
+                COALESCE(SUM(v.valor_total), 0.0) AS total_dia,
+                COUNT(v.id) AS qtd_vendas
+            FROM vendas v
+            WHERE {clausula_where}
+              AND (v.status IS NULL OR v.status != 'CANCELADA')
+            GROUP BY substr(v.data_hora, 1, 10)
+            ORDER BY dia ASC;
+        """
+        cursor.execute(sql_diario, params)
+        rows_diario = cursor.fetchall()
+        vendas_diarias = []
+        for r in rows_diario:
+            dia_raw = r["dia"]
+            try:
+                dia_fmt = datetime.strptime(dia_raw, "%Y-%m-%d").strftime("%d/%m")
+            except Exception:
+                dia_fmt = dia_raw
+            vendas_diarias.append({
+                "dia_iso": dia_raw,
+                "dia_fmt": dia_fmt,
+                "faturamento": float(r["total_dia"]),
+                "vendas": int(r["qtd_vendas"]),
+            })
+
+        # 3. Formas de Pagamento
+        sql_formas = f"""
+            SELECT 
+                COALESCE(UPPER(v.forma_pagamento), 'DINHEIRO') AS forma,
+                COALESCE(SUM(v.valor_total), 0.0) AS total,
+                COUNT(v.id) AS qtd
+            FROM vendas v
+            WHERE {clausula_where}
+              AND (v.status IS NULL OR v.status != 'CANCELADA')
+            GROUP BY COALESCE(UPPER(v.forma_pagamento), 'DINHEIRO')
+            ORDER BY total DESC;
+        """
+        cursor.execute(sql_formas, params)
+        formas_lista = []
+        for rf in cursor.fetchall():
+            tot_f = float(rf["total"])
+            pct = round((tot_f / fat * 100), 1) if fat > 0 else 0.0
+            formas_lista.append({
+                "forma": rf["forma"],
+                "total": tot_f,
+                "qtd": int(rf["qtd"]),
+                "percentual": pct,
+            })
+
+        # 4. Top Produtos Mais Vendidos (Curva ABC)
+        sql_top = f"""
+            SELECT 
+                v.produto_nome,
+                SUM(v.quantidade) AS qtd_total,
+                SUM(v.valor_total) AS total_arrecadado,
+                COALESCE(SUM(v.quantidade * COALESCE(p.preco_custo, 0.0)), 0.0) AS custo_total,
+                COALESCE(SUM(v.valor_total - (v.quantidade * COALESCE(p.preco_custo, 0.0))), 0.0) AS lucro_total
+            FROM vendas v
+            LEFT JOIN produtos p ON v.produto_id = p.id
+            WHERE {clausula_where}
+              AND (v.status IS NULL OR v.status != 'CANCELADA')
+            GROUP BY v.produto_id, v.produto_nome
+            ORDER BY total_arrecadado DESC
+            LIMIT 10;
+        """
+        cursor.execute(sql_top, params)
+        top_produtos = []
+        for rp in cursor.fetchall():
+            tot_p = float(rp["total_arrecadado"])
+            lucro_p = float(rp["lucro_total"])
+            margem_p = round((lucro_p / tot_p * 100), 1) if tot_p > 0 else 0.0
+            top_produtos.append({
+                "nome": rp["produto_nome"],
+                "quantidade": int(rp["qtd_total"]),
+                "faturamento": tot_p,
+                "custo": float(rp["custo_total"]),
+                "lucro": lucro_p,
+                "margem": margem_p,
+            })
+
+        # 5. Faixas de Horário (Manhã, Tarde, Noite)
+        sql_horarios = f"""
+            SELECT 
+                CAST(substr(v.data_hora, 12, 2) AS INTEGER) AS hora,
+                v.valor_total
+            FROM vendas v
+            WHERE {clausula_where}
+              AND (v.status IS NULL OR v.status != 'CANCELADA');
+        """
+        cursor.execute(sql_horarios, params)
+        faixas = {"manha": 0.0, "tarde": 0.0, "noite": 0.0}
+        for rh in cursor.fetchall():
+            h = rh["hora"] if rh["hora"] is not None else 12
+            val = float(rh["valor_total"])
+            if 6 <= h < 12:
+                faixas["manha"] += val
+            elif 12 <= h < 18:
+                faixas["tarde"] += val
+            else:
+                faixas["noite"] += val
+
+        # 6. Log de Transações do Período (Vendas Ativas e Estornos/Canceladas)
+        sql_logs = f"""
+            SELECT 
+                v.id,
+                v.produto_id,
+                v.produto_nome,
+                v.quantidade,
+                v.preco_unitario,
+                v.valor_total,
+                v.data_hora,
+                COALESCE(v.forma_pagamento, 'DINHEIRO') AS forma_pagamento,
+                COALESCE(v.status, 'CONCLUIDA') AS status
+            FROM vendas v
+            WHERE {clausula_where}
+            ORDER BY v.id DESC
+            LIMIT 100;
+        """
+        cursor.execute(sql_logs, params)
+        logs_transacoes = []
+        for rlg in cursor.fetchall():
+            logs_transacoes.append({
+                "id": int(rlg["id"]),
+                "produto_id": rlg["produto_id"],
+                "produto_nome": rlg["produto_nome"],
+                "quantidade": int(rlg["quantidade"]),
+                "preco_unitario": float(rlg["preco_unitario"]),
+                "valor_total": float(rlg["valor_total"]),
+                "data_hora": rlg["data_hora"],
+                "forma_pagamento": rlg["forma_pagamento"],
+                "status": rlg["status"],
+            })
+
+    return {
+        "periodo": periodo,
+        "titulo_periodo": titulo_periodo,
+        "total_faturamento": fat,
+        "total_faturamento_bruto": fat_bruto,
+        "total_cancelado": tot_cancelado,
+        "total_canceladas": qtd_canceladas,
+        "itens_cancelados": itens_cancelados,
+        "total_custo": custo,
+        "total_lucro": lucro,
+        "margem_lucro": margem,
+        "total_vendas": vendas_n,
+        "total_itens": itens_n,
+        "ticket_medio": ticket,
+        "vendas_diarias": vendas_diarias,
+        "formas_pagamento": formas_lista,
+        "top_produtos": top_produtos,
+        "faixas_horario": faixas,
+        "logs_transacoes": logs_transacoes,
+    }
 
 
 # ============================================================================
@@ -865,6 +1574,9 @@ def definir_senha_admin(
                 "Senha atual incorreta. Para redefinir sem a senha anterior, utilize sua chave de licença.",
             )
 
+    # Obtém a senha anterior para migração de arquivos já gerados
+    senha_anterior = obter_senha_para_protecao_relatorio()
+
     # 1. Gera salt criptográfico aleatório e calcula hash PBKDF2
     salt_bytes = secrets.token_bytes(16)
     hash_pwd = hashlib.pbkdf2_hmac(
@@ -882,12 +1594,78 @@ def definir_senha_admin(
     except Exception:
         pass
 
+    # Backup determinístico de segurança para garantir recuperação infalível
+    try:
+        salt_sys = bytes.fromhex(obter_config("system_crypto_salt", "00" * 16))
+        cifrado_bytes = bytes([b ^ salt_sys[i % len(salt_sys)] for i, b in enumerate(nova.encode("utf-8"))])
+        salvar_config("admin_excel_pwd_det", base64.b64encode(cifrado_bytes).decode("utf-8"))
+    except Exception:
+        pass
+
     # 3. Salva no banco de dados SQLite
     salvar_config("admin_pwd_salt", salt_bytes.hex())
     salvar_config("admin_pwd_hash", hash_pwd)
     salvar_config("admin_pwd_updated_at", datetime.now().isoformat())
 
+    # 4. Re-encripta a planilha do dia de hoje caso já tenha sido exportada em disco
+    candidatas = [senha_atual, senha_anterior, "Central@2026", "Teste@1234"]
+    _reencriptar_relatorio_existente(nova, [p for p in candidatas if p])
+
     return True, "Senha de administrador configurada e ativada com sucesso!"
+
+
+def _reencriptar_relatorio_existente(nova_senha: str, candidatas: List[str]) -> bool:
+    """
+    Se o relatório de fechamento de hoje já existir em disco, descriptografa
+    e reaplica a criptografia com a nova senha para abertura imediata no Excel.
+    """
+    try:
+        import msoffcrypto, io
+        hoje_iso = datetime.now().strftime("%Y-%m-%d")
+        nome_arquivo = f"relatorio_vendas_{hoje_iso}.xlsx"
+        caminho_arquivo = os.path.join(get_base_dir(), nome_arquivo)
+
+        if not os.path.exists(caminho_arquivo):
+            return True
+
+        with open(caminho_arquivo, "rb") as f_in:
+            conteudo_bruto = f_in.read()
+
+        buf_in = io.BytesIO(conteudo_bruto)
+        buf_dec = io.BytesIO()
+
+        of = msoffcrypto.OfficeFile(buf_in)
+        if of.is_encrypted():
+            descriptografado = False
+            for pwd in candidatas:
+                try:
+                    buf_in.seek(0)
+                    of_t = msoffcrypto.OfficeFile(buf_in)
+                    if of_t.is_encrypted():
+                        of_t.load_key(password=pwd)
+                        buf_dec.seek(0)
+                        buf_dec.truncate()
+                        of_t.decrypt(buf_dec)
+                        descriptografado = True
+                        break
+                except Exception:
+                    pass
+            if not descriptografado:
+                return False
+        else:
+            buf_dec = io.BytesIO(conteudo_bruto)
+
+        buf_dec.seek(0)
+        buf_out = io.BytesIO()
+        of_novo = msoffcrypto.OfficeFile(buf_dec)
+        of_novo.encrypt(nova_senha, buf_out)
+
+        with open(caminho_arquivo, "wb") as f_out:
+            f_out.write(buf_out.getvalue())
+
+        return True
+    except Exception:
+        return False
 
 
 def obter_senha_para_protecao_relatorio() -> str:
@@ -896,11 +1674,30 @@ def obter_senha_para_protecao_relatorio() -> str:
     - Se o administrador configurou senha personalizada: decifra e utiliza a senha dele.
     - Se ainda não configurou: utiliza uma senha segura padrão de fábrica ("Central@2026").
     """
+    if not existe_senha_admin():
+        return "Central@2026"
+
+    # 1. Tenta decifrar via Fernet
     pwd_cifrada = obter_config("admin_excel_pwd_enc", "")
-    if pwd_cifrada and existe_senha_admin():
+    if pwd_cifrada:
         try:
             fernet = Fernet(_obter_chave_cifracao_interna())
-            return fernet.decrypt(pwd_cifrada.encode("utf-8")).decode("utf-8")
+            dec = fernet.decrypt(pwd_cifrada.encode("utf-8")).decode("utf-8")
+            if dec:
+                return dec
+        except Exception:
+            pass
+
+    # 2. Fallback determinístico (100% à prova de falhas de timestamp ou versão)
+    pwd_det = obter_config("admin_excel_pwd_det", "")
+    if pwd_det:
+        try:
+            salt_sys = bytes.fromhex(obter_config("system_crypto_salt", "00" * 16))
+            cifrado_bytes = base64.b64decode(pwd_det.encode("utf-8"))
+            dec_bytes = bytes([b ^ salt_sys[i % len(salt_sys)] for i, b in enumerate(cifrado_bytes)])
+            dec_str = dec_bytes.decode("utf-8")
+            if dec_str:
+                return dec_str
         except Exception:
             pass
 
@@ -979,7 +1776,15 @@ def obter_modo_emissao() -> str:
     Retorna o modo de operação do sistema:
     - 'NAO_FISCAL': Cupom de balcão / controle interno sem valor fiscal.
     - 'FISCAL_NFCE': Emissão fiscal via SEFAZ com contingência offline.
+    Respeita a edição do software em execução (Não-Fiscal vs Fiscal vs Completa).
     """
+    try:
+        import edicao_config
+        modo_fixo = edicao_config.obter_modo_fixo()
+        if modo_fixo:
+            return modo_fixo
+    except Exception:
+        pass
     return obter_config("fiscal_modo_emissao", "NAO_FISCAL")
 
 
@@ -1103,6 +1908,7 @@ def gravar_venda_fiscal(
     caminho_xml_protocolado: str = "",
     qr_code_url: str = "",
     motivo_contingencia: str = "",
+    cpf_destinatario: str = "",
 ) -> bool:
     """Registra uma emissão fiscal vinculada a uma venda no banco de dados."""
     try:
@@ -1115,22 +1921,23 @@ def gravar_venda_fiscal(
                     tipo_emissao, status_fiscal, dh_emissao, cstat,
                     motivo_status, protocolo_autorizacao, dh_autorizacao,
                     caminho_xml_assinado, caminho_xml_protocolado, qr_code_url,
-                    motivo_contingencia
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    motivo_contingencia, cpf_destinatario
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(venda_id) DO UPDATE SET
                     status_fiscal = excluded.status_fiscal,
                     cstat = excluded.cstat,
                     motivo_status = excluded.motivo_status,
                     protocolo_autorizacao = excluded.protocolo_autorizacao,
                     dh_autorizacao = excluded.dh_autorizacao,
-                    caminho_xml_protocolado = excluded.caminho_xml_protocolado;
+                    caminho_xml_protocolado = excluded.caminho_xml_protocolado,
+                    cpf_destinatario = excluded.cpf_destinatario;
                 """,
                 (
                     venda_id, modelo, serie, numero_nfce, chave_acesso,
                     tipo_emissao, status_fiscal, dh_emissao, cstat,
                     motivo_status, protocolo_autorizacao, dh_autorizacao,
                     caminho_xml_assinado, caminho_xml_protocolado, qr_code_url,
-                    motivo_contingencia,
+                    motivo_contingencia, cpf_destinatario,
                 ),
             )
             conn.commit()

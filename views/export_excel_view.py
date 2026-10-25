@@ -144,16 +144,6 @@ class ExportExcelView(ctk.CTkFrame):
         self.result_box = ctk.CTkFrame(main_card, fg_color=theme.INNER_CARD_BG, corner_radius=10, border_width=1, border_color=theme.BORDER_COLOR)
         self.result_box.pack(fill="x", padx=24, pady=(0, 18))
 
-        self.lbl_status = ctk.CTkLabel(
-            self.result_box,
-            text="Nenhum arquivo gerado nesta sessão ainda. Clique no botão acima para exportar a planilha do dia.",
-            font=ctk.CTkFont(size=12),
-            text_color=theme.TEXT_SECONDARY,
-            wraplength=600,
-            justify="left",
-        )
-        self.lbl_status.pack(side="left", padx=16, pady=14)
-
         self.btn_abrir_pasta = ctk.CTkButton(
             self.result_box,
             text="Abrir Pasta",
@@ -181,6 +171,17 @@ class ExportExcelView(ctk.CTkFrame):
             state="disabled",
         )
         self.btn_abrir_arquivo.pack(side="right", padx=(0, 6), pady=12)
+
+        self.lbl_status = ctk.CTkLabel(
+            self.result_box,
+            text="Nenhum arquivo gerado nesta sessão ainda. Clique no botão acima para exportar a planilha do dia.",
+            font=ctk.CTkFont(size=12),
+            text_color=theme.TEXT_SECONDARY,
+            wraplength=480,
+            justify="left",
+            anchor="w",
+        )
+        self.lbl_status.pack(side="left", fill="both", expand=True, padx=16, pady=12)
 
         # 3. Card de Especificações e Pré-visualização da Planilha
         spec_card = ctk.CTkFrame(self, corner_radius=12, fg_color=theme.CARD_BG, border_width=1, border_color=theme.BORDER_COLOR)
@@ -236,8 +237,45 @@ class ExportExcelView(ctk.CTkFrame):
         ).pack(anchor="w", padx=16, pady=12)
 
     def recarregar_dados(self):
-        """Atualiza o estado da tela e a situação da proteção por senha."""
+        """Atualiza o estado da tela, situação da proteção e verifica fechamentos existentes."""
         self._atualizar_status_protecao()
+        self._verificar_arquivo_existente()
+
+    def _verificar_arquivo_existente(self):
+        """
+        Localiza automaticamente o relatório mais recente em disco ou gerado pelo
+        Fechamento de Caixa, habilitando os botões de abertura imediatamente.
+        Se já houver vendas hoje no banco, gera a planilha automaticamente caso não exista.
+        """
+        caminho_recente = reports.obter_ultimo_relatorio_excel_gerado()
+
+        if not caminho_recente or not os.path.exists(caminho_recente):
+            try:
+                resumo = db.obter_resumo_dia()
+                if resumo and resumo.get("total_vendas", 0) > 0:
+                    sucesso, _, caminho_gerado = reports.gerar_relatorio_diario_excel()
+                    if sucesso and caminho_gerado and os.path.exists(caminho_gerado):
+                        caminho_recente = caminho_gerado
+            except Exception:
+                pass
+
+        if caminho_recente and os.path.exists(caminho_recente):
+            self.ultimo_arquivo_gerado = caminho_recente
+            nome_arquivo = os.path.basename(caminho_recente)
+            tem_senha = db.existe_senha_admin()
+            dica_senha = "sua Senha do Administrador personalizada" if tem_senha else "a Senha Padrão ('Central@2026')"
+            self.lbl_status.configure(
+                text=f"✔ Planilha disponível: {nome_arquivo}\n"
+                     f"Gerada pelo Fechamento de Caixa, vendas do dia ou exportação.\n"
+                     f"🔒 Senha para Abrir: Ao abrir o arquivo no Excel, informe {dica_senha}.\n"
+                     f"🛡️ Células com auditoria digital e integridade garantida por SHA-256.",
+                text_color=theme.STOCK_COLOR[1],
+            )
+            self.btn_abrir_arquivo.configure(state="normal")
+            self.btn_abrir_pasta.configure(state="normal")
+        else:
+            self.btn_abrir_arquivo.configure(state="disabled")
+            self.btn_abrir_pasta.configure(state="normal")
 
     def _atualizar_status_protecao(self):
         """Atualiza os indicadores visuais de proteção de fechamentos."""
@@ -266,10 +304,10 @@ class ExportExcelView(ctk.CTkFrame):
             tem_senha = db.existe_senha_admin()
             dica_senha = "sua Senha do Administrador personalizada" if tem_senha else "a Senha Padrão ('Central@2026' - altere no botão ao lado)"
             self.lbl_status.configure(
-                text=f"✔ Planilha gerada e CRIPTOGRAFADA com sucesso!\n"
+                text=f"✔ Planilha gerada com sucesso!\n"
                      f"Arquivo: {nome_arquivo}\n"
-                     f"🔒 Senha para Abrir: Ao abrir o arquivo no Excel, informe {dica_senha}.\n"
-                     f"🛡️ Somente o dono com a senha poderá visualizar o conteúdo. Células travadas e autenticadas com SHA-256.",
+                     f"🔒 Proteção Ativa: Células e valores travados contra alterações com a senha do administrador.\n"
+                     f"🛡️ Compatível nativamente com Excel, LibreOffice e Google Sheets. Selado com SHA-256.",
                 text_color=theme.STOCK_COLOR[1],
             )
             self.btn_abrir_arquivo.configure(state="normal")
@@ -278,19 +316,55 @@ class ExportExcelView(ctk.CTkFrame):
             self.lbl_status.configure(text=f"Aviso: {msg}", text_color=theme.WARNING_COLOR[1])
 
     def _abrir_arquivo_excel(self):
-        if self.ultimo_arquivo_gerado and os.path.exists(self.ultimo_arquivo_gerado):
+        caminho = reports.obter_ultimo_relatorio_excel_gerado() or self.ultimo_arquivo_gerado
+        if not caminho or not os.path.exists(caminho):
             try:
-                os.startfile(self.ultimo_arquivo_gerado)
-            except Exception as e:
-                self.lbl_status.configure(text=f"Erro ao abrir arquivo: {str(e)}", text_color=theme.ACCENT_RED[1])
+                resumo = db.obter_resumo_dia()
+                if resumo and resumo.get("total_vendas", 0) > 0:
+                    sucesso, _, caminho_gerado = reports.gerar_relatorio_diario_excel()
+                    if sucesso and caminho_gerado and os.path.exists(caminho_gerado):
+                        caminho = caminho_gerado
+            except Exception:
+                pass
+
+        tem_senha = db.existe_senha_admin()
+        dica_senha = "sua Senha do Administrador personalizada" if tem_senha else "a Senha Padrão ('Central@2026')"
+        sucesso, msg = reports.abrir_arquivo_planilha(caminho)
+        if sucesso:
+            if caminho:
+                self.ultimo_arquivo_gerado = caminho
+            self.lbl_status.configure(
+                text=f"✔ {msg}\n"
+                     f"🔒 Senha para Abrir: Ao abrir o arquivo no Excel, informe {dica_senha}.\n"
+                     f"🛡️ Células com auditoria digital e integridade garantida por SHA-256.",
+                text_color=theme.STOCK_COLOR[1],
+            )
+        else:
+            try:
+                subprocess.Popen(f'explorer /select,"{os.path.abspath(caminho)}"')
+                self.lbl_status.configure(
+                    text=f"📁 Pasta aberta com a planilha selecionada.\n"
+                         f"🔒 Senha para Abrir: {dica_senha}.",
+                    text_color=theme.STOCK_COLOR[1],
+                )
+            except Exception:
+                self.lbl_status.configure(text=f"⚠️ {msg}", text_color=theme.WARNING_COLOR[1])
 
     def _abrir_pasta_destino(self):
-        if self.ultimo_arquivo_gerado and os.path.exists(self.ultimo_arquivo_gerado):
+        caminho = reports.obter_ultimo_relatorio_excel_gerado() or self.ultimo_arquivo_gerado
+        if caminho and os.path.exists(caminho):
+            self.ultimo_arquivo_gerado = caminho
             try:
-                subprocess.Popen(f'explorer /select,"{os.path.abspath(self.ultimo_arquivo_gerado)}"')
+                subprocess.Popen(f'explorer /select,"{os.path.abspath(caminho)}"')
             except Exception:
-                pasta = os.path.dirname(os.path.abspath(self.ultimo_arquivo_gerado))
-                os.startfile(pasta)
+                pasta = os.path.dirname(os.path.abspath(caminho))
+                try:
+                    os.startfile(pasta)
+                except Exception:
+                    pass
         else:
             pasta = db.get_base_dir()
-            os.startfile(pasta)
+            try:
+                os.startfile(pasta)
+            except Exception:
+                pass

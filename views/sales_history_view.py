@@ -11,6 +11,7 @@ from tkinter import messagebox
 import customtkinter as ctk
 
 import database as db
+import reports
 import theme
 
 
@@ -31,6 +32,8 @@ class SalesHistoryView(ctk.CTkFrame):
         super().__init__(parent, fg_color="transparent")
         self.on_goto_nova_venda = on_goto_nova_venda
         self.on_venda_cancelada = on_venda_cancelada
+        self._debounce_timer = None
+        self._necessita_recarregar = True
 
         self._criar_layout()
         self.recarregar_dados()
@@ -122,7 +125,8 @@ class SalesHistoryView(ctk.CTkFrame):
             text_color=theme.ENTRY_TEXT,
         )
         self.entry_busca.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        self.entry_busca.bind("<KeyRelease>", lambda event: self.recarregar_dados())
+        self.entry_busca.bind("<KeyRelease>", self._ao_digitar_busca)
+        self.entry_busca.bind("<Return>", self._ao_confirmar_busca)
 
         ctk.CTkButton(
             filter_bar,
@@ -136,9 +140,9 @@ class SalesHistoryView(ctk.CTkFrame):
             command=self.recarregar_dados,
         ).pack(side="right")
 
-        # Cabeçalho da Tabela
+        # Cabeçalho da Tabela (alinhado milimetricamente ao frame com scroll)
         header_grid = ctk.CTkFrame(table_card, height=36, fg_color=theme.INNER_CARD_BG, corner_radius=6, border_width=1, border_color=theme.BORDER_COLOR)
-        header_grid.pack(fill="x", padx=16, pady=(0, 6))
+        header_grid.pack(fill="x", padx=(22, 33), pady=(0, 6))
 
         col_configs = [
             ("ID", 55, "center"),
@@ -158,6 +162,7 @@ class SalesHistoryView(ctk.CTkFrame):
                 font=ctk.CTkFont(size=11, weight="bold"),
                 text_color=theme.TEXT_SECONDARY,
                 width=largura,
+                anchor=alinhamento,
             )
             if alinhamento == "w":
                 lbl.pack(side="left", fill="x", expand=True, padx=8)
@@ -168,8 +173,26 @@ class SalesHistoryView(ctk.CTkFrame):
         self.scroll_frame = ctk.CTkScrollableFrame(table_card, fg_color="transparent")
         self.scroll_frame.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
+    def _ao_digitar_busca(self, event=None):
+        if hasattr(self, "_debounce_timer") and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+        self._debounce_timer = self.after(160, self.recarregar_dados)
+
+    def _ao_confirmar_busca(self, event=None):
+        if hasattr(self, "_debounce_timer") and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+            self._debounce_timer = None
+        self.recarregar_dados()
+        return "break"
+
     def recarregar_dados(self):
         """Atualiza a lista com base nas vendas do dia e nos filtros."""
+        if hasattr(self, "_debounce_timer") and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+            self._debounce_timer = None
+
+        self._necessita_recarregar = False
+
         for w in self.scroll_frame.winfo_children():
             w.destroy()
 
@@ -184,14 +207,9 @@ class SalesHistoryView(ctk.CTkFrame):
         self.lbl_vendas.configure(text=str(vendas_count))
         self.lbl_ticket.configure(text=formatar_moeda(ticket))
 
-        # Lista vendas recentes do dia
-        todas_vendas = db.obter_vendas_recentes_do_dia(limite=500)
-        termo = self.entry_busca.get().strip().lower() if hasattr(self, "entry_busca") else ""
-
-        if termo:
-            vendas = [v for v in todas_vendas if termo in v["produto_nome"].lower()]
-        else:
-            vendas = todas_vendas
+        # Busca vendas diretamente no banco com suporte a filtros inteligentes (nome, ID, data, status)
+        termo = self.entry_busca.get().strip() if hasattr(self, "entry_busca") else ""
+        vendas = db.buscar_vendas(termo, limite=500)
 
         if not vendas:
             lbl_vazio = ctk.CTkLabel(
@@ -203,7 +221,7 @@ class SalesHistoryView(ctk.CTkFrame):
             lbl_vazio.pack(pady=40)
             return
 
-        for v in vendas:
+        for v in vendas[:60]:
             is_cancelada = (v.get("status") == "CANCELADA")
             cor_linha = theme.INNER_CARD_BG
             cor_texto = theme.TEXT_MUTED if is_cancelada else theme.TEXT_PRIMARY
@@ -218,7 +236,7 @@ class SalesHistoryView(ctk.CTkFrame):
                 border_width=1,
                 border_color=theme.BORDER_COLOR,
             )
-            linha.pack(fill="x", pady=2)
+            linha.pack(fill="x", pady=3)
 
             # ID
             ctk.CTkLabel(
@@ -327,6 +345,14 @@ class SalesHistoryView(ctk.CTkFrame):
                 )
             btn_acao.pack(fill="both", expand=True)
 
+        if len(vendas) > 60:
+            ctk.CTkLabel(
+                self.scroll_frame,
+                text=f"Exibindo as 60 transações mais recentes de {len(vendas)}. Utilize o filtro para localizar uma venda específica.",
+                font=ctk.CTkFont(size=11, slant="italic"),
+                text_color=theme.TEXT_MUTED,
+            ).pack(pady=8)
+
     def _confirmar_cancelamento(self, venda_id: int, produto_nome: str, quantidade: int):
         """Exibe diálogo de confirmação e realiza o cancelamento da venda no banco."""
         confirma = messagebox.askyesno(
@@ -342,6 +368,10 @@ class SalesHistoryView(ctk.CTkFrame):
 
         sucesso, msg = db.cancelar_venda(venda_id)
         if sucesso:
+            try:
+                reports.gerar_relatorio_diario_excel()
+            except Exception as e:
+                print(f"[SalesHistoryView] Aviso ao atualizar Excel pós-cancelamento: {e}")
             messagebox.showinfo("Venda Cancelada", msg)
             self.recarregar_dados()
             if self.on_venda_cancelada:

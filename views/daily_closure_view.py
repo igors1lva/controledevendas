@@ -130,9 +130,9 @@ class DailyClosureView(ctk.CTkFrame):
         table_card = ctk.CTkFrame(self, corner_radius=12, fg_color=theme.CARD_BG, border_width=1, border_color=theme.BORDER_COLOR)
         table_card.pack(fill="both", expand=True, padx=24, pady=(0, 20))
 
-        # Cabeçalho da Tabela (5 Colunas Limpas e Objetivas)
+        # Cabeçalho da Tabela (alinhado milimetricamente ao frame com scroll)
         header_grid = ctk.CTkFrame(table_card, height=38, fg_color=theme.INNER_CARD_BG, corner_radius=6, border_width=1, border_color=theme.BORDER_COLOR)
-        header_grid.pack(fill="x", padx=16, pady=(14, 6))
+        header_grid.pack(fill="x", padx=(22, 33), pady=(14, 6))
 
         col_configs = [
             ("Nome do Produto", 0, "w"),
@@ -148,6 +148,7 @@ class DailyClosureView(ctk.CTkFrame):
                 text=nome_col,
                 font=ctk.CTkFont(size=11, weight="bold"),
                 text_color=theme.TEXT_SECONDARY,
+                anchor=alinhamento,
             )
             if alinhamento == "w":
                 lbl.pack(side="left", fill="x", expand=True, padx=8)
@@ -159,9 +160,9 @@ class DailyClosureView(ctk.CTkFrame):
         self.scroll_frame = ctk.CTkScrollableFrame(table_card, fg_color="transparent")
         self.scroll_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
-        # Linha Totalizadora Fixa no Rodapé
+        # Linha Totalizadora Fixa no Rodapé (alinhada às colunas)
         self.footer_total = ctk.CTkFrame(table_card, height=44, fg_color=theme.INNER_CARD_BG, corner_radius=6, border_width=1, border_color=theme.ACCENT_BLUE)
-        self.footer_total.pack(fill="x", padx=16, pady=(0, 14))
+        self.footer_total.pack(fill="x", padx=(22, 33), pady=(0, 14))
 
         self.lbl_total_label = ctk.CTkLabel(
             self.footer_total,
@@ -238,7 +239,7 @@ class DailyClosureView(ctk.CTkFrame):
 
         for row in dados:
             linha = ctk.CTkFrame(self.scroll_frame, height=40, fg_color=theme.INNER_CARD_BG, corner_radius=6, border_width=1, border_color=theme.BORDER_COLOR)
-            linha.pack(fill="x", pady=2)
+            linha.pack(fill="x", pady=3)
 
             ctk.CTkLabel(linha, text=row["produto_nome"], font=ctk.CTkFont(size=12, weight="bold"), text_color=theme.TEXT_PRIMARY, anchor="w").pack(side="left", fill="x", expand=True, padx=8)
             ctk.CTkLabel(linha, text=f"{row['quantidade_total']} un", font=ctk.CTkFont(size=12), text_color=theme.TEXT_PRIMARY, width=110).pack(side="left", padx=4)
@@ -258,7 +259,7 @@ class DailyClosureView(ctk.CTkFrame):
             )
         else:
             self.lbl_auditoria.configure(
-                text="ℹ️ Fechamento do dia em aberto. O selo SHA-256 e a proteção criptográfica são gravados ao exportar para Excel.",
+                text="📋 Fechamento do dia em aberto. O selo SHA-256 e a proteção criptográfica são gravados ao exportar para Excel.",
                 text_color=theme.TEXT_SECONDARY,
             )
 

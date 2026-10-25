@@ -88,18 +88,32 @@ class FiscalConfigView(ctk.CTkFrame):
         )
         self.lbl_modo_desc.pack(anchor="w", pady=(4, 0))
 
-        # Seletor Segmentado de Modo
-        self.seg_modo = ctk.CTkSegmentedButton(
-            row_modo,
-            values=["🔒 Controle Interno (Não-Fiscal)", "🏛️ Emissor Fiscal NFC-e (SEFAZ)"],
-            command=self._ao_alterar_modo_segmentado,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            height=38,
-        )
-        self.seg_modo.pack(side="right", padx=(10, 0))
+        import edicao_config
+        self.pode_alternar = edicao_config.permite_alternancia_regime()
 
-        val_inicial = "🏛️ Emissor Fiscal NFC-e (SEFAZ)" if self.modo_atual == "FISCAL_NFCE" else "🔒 Controle Interno (Não-Fiscal)"
-        self.seg_modo.set(val_inicial)
+        if self.pode_alternar:
+            # Seletor Segmentado de Modo para Edição Completa (Dual)
+            self.seg_modo = ctk.CTkSegmentedButton(
+                row_modo,
+                values=["🔒 Controle Interno (Não-Fiscal)", "🏛️ Emissor Fiscal NFC-e (SEFAZ)"],
+                command=self._ao_alterar_modo_segmentado,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                height=38,
+            )
+            self.seg_modo.pack(side="right", padx=(10, 0))
+            val_inicial = "🏛️ Emissor Fiscal NFC-e (SEFAZ)" if self.modo_atual == "FISCAL_NFCE" else "🔒 Controle Interno (Não-Fiscal)"
+            self.seg_modo.set(val_inicial)
+        else:
+            # Badge Fixo para Edição Fiscal Dedicada
+            badge_fixo = ctk.CTkFrame(row_modo, fg_color=theme.INNER_CARD_BG, corner_radius=8, border_width=1, border_color="#0284C7")
+            badge_fixo.pack(side="right", padx=(10, 0))
+            ctk.CTkLabel(
+                badge_fixo,
+                text="🏛️ Edição Fiscal Dedicada",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=theme.PRICE_COLOR[1],
+            ).pack(padx=14, pady=8)
+
         self._atualizar_descricao_modo()
 
         # 3. Tabview com Configurações e Monitor
@@ -113,6 +127,9 @@ class FiscalConfigView(ctk.CTkFrame):
         self._construir_tab_monitor()
 
     def _ao_alterar_modo_segmentado(self, escolha: str):
+        if not self.pode_alternar:
+            return
+
         novo_modo = "NAO_FISCAL" if "Não-Fiscal" in escolha else "FISCAL_NFCE"
 
         # Se não houve alteração real, não solicita senha
@@ -132,18 +149,19 @@ class FiscalConfigView(ctk.CTkFrame):
 
         def _cancelar_troca():
             # Restaura a seleção do seletor visual para o modo que estava ativo
-            val_anterior = (
-                "🏛️ Emissor Fiscal NFC-e (SEFAZ)"
-                if self.modo_atual == "FISCAL_NFCE"
-                else "🔒 Controle Interno (Não-Fiscal)"
-            )
-            self.seg_modo.set(val_anterior)
+            if hasattr(self, "seg_modo"):
+                val_anterior = (
+                    "🏛️ Emissor Fiscal NFC-e (SEFAZ)"
+                    if self.modo_atual == "FISCAL_NFCE"
+                    else "🔒 Controle Interno (Não-Fiscal)"
+                )
+                self.seg_modo.set(val_anterior)
 
         nome_alvo = "Emissor Fiscal NFC-e (SEFAZ)" if novo_modo == "FISCAL_NFCE" else "Controle Interno (Não-Fiscal)"
         AdminAuthModal(
             parent=self.winfo_toplevel(),
             titulo="🔐 Autorização de Administrador",
-            motivo=f"Para alternar o regime operacional para '{nome_alvo}', confirme a senha do administrador ou a senha padrão Central@2026:",
+            motivo=f"Para alternar o regime operacional para '{nome_alvo}', confirme a senha do administrador cadastrada ou a senha padrão Central@2026:",
             on_confirm_callback=_confirmar_troca,
             on_cancel_callback=_cancelar_troca,
         )
